@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Tetris</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; padding: 0; }
+  body {
+    background: radial-gradient(1200px 800px at 50% -10%, #131c2b 0%, #0a0e14 60%) fixed, #0a0e14;
+    color: #d7e0ec;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    touch-action: manipulation;
+    overflow: hidden;
+  }
+
+  .layout {
+    height: 100%;
+    display: flex;
+    gap: 14px;
+    padding: 14px;
+    align-items: stretch;
+    justify-content: center;
+  }
+
+  .panel { width: 158px; display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+
+  .box {
+    background: #101826;
+    border: 1px solid #223049;
+    border-radius: 10px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+  .box h2 { margin: 0; font-size: 11px; letter-spacing: 2px; color: #7f93ad; font-weight: 600; }
+
+  .board-wrap { position: relative; display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; }
+  #board {
+    background: #0b111c;
+    border: 1px solid #24344e;
+    border-radius: 6px;
+    box-shadow: 0 0 40px rgba(56, 130, 246, .08), inset 0 0 24px rgba(0, 0, 0, .5);
+  }
+
+  .overlay {
+    position: absolute;
+    inset: -1px;
+    background: rgba(6, 10, 17, .78);
+    backdrop-filter: blur(3px);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    text-align: center;
+    z-index: 5;
+    cursor: pointer;
+    padding: 12px;
+  }
+  .ov-title { font-size: 28px; letter-spacing: 4px; font-weight: 700; color: #eaf2ff; }
+  .ov-sub { font-size: 13px; color: #9fb2cc; line-height: 1.7; white-space: pre-line; }
+
+  .hidden { display: none !important; }
+
+  .stat { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; }
+  .label { font-size: 10px; letter-spacing: 2px; color: #7f93ad; }
+  .value { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 15px; color: #eaf2ff; font-variant-numeric: tabular-nums; }
+  .value.big { font-size: 20px; }
+  .stat-row { display: flex; gap: 18px; }
+
+  .legend { margin: auto 0 0; font-size: 10.5px; color: #5c7089; line-height: 1.7; text-align: center; }
+
+  .hold-box.dim canvas { opacity: .35; filter: grayscale(.6); }
+
+  /* ---- mobile touch controls ---- */
+  #touch {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 20;
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+    background: linear-gradient(to top, rgba(6, 10, 17, .95) 55%, rgba(6, 10, 17, 0));
+  }
+  #touch button {
+    flex: 1;
+    max-width: 78px;
+    height: 62px;
+    border-radius: 14px;
+    border: 1px solid #2c3e5c;
+    background: #17233a;
+    color: #dce7f5;
+    font-size: 20px;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #touch button:active { background: #26406b; transform: scale(.97); }
+  body.touch-mode .layout { padding-bottom: 108px; }
+
+  @media (max-width: 720px) {
+    .layout { flex-direction: column; align-items: center; gap: 10px; padding: 10px; }
+    .panel { width: auto; max-width: 460px; flex-direction: row; justify-content: center; }
+    .board-wrap { flex: 1; }
+    .legend { display: none; }
+    .box h2 { font-size: 10px; }
+  }
+</style>
+</head>
+<body>
+  <div class="layout" id="app">
+    <aside class="panel panel-left">
+      <section class="box hold-box" id="hold-box">
+        <h2>HOLD</h2>
+        <canvas id="hold-canvas"></canvas>
+      </section>
+      <section class="box stats">
+        <div class="stat"><span class="label">SCORE</span><span class="value big" id="score">0</span></div>
+        <div class="stat-row">
+          <div class="stat"><span class="label">LEVEL</span><span class="value" id="level">1</span></div>
+          <div class="stat"><span class="label">LINES</span><span class="value" id="lines">0</span></div>
+        </div>
+      </section>
+      <p class="legend">&#8592; &#8594; move &middot; &#8595; soft drop<br>&#8593;/X rotate CW &middot; Z CCW<br>Space hard drop &middot; C hold<br>P pause &middot; Enter start</p>
+    </aside>
+
+    <main class="board-wrap" id="board-wrap">
+      <canvas id="board"></canvas>
+      <div class="overlay hidden" id="overlay">
+        <div class="ov-title" id="overlay-title"></div>
+        <div class="ov-sub" id="overlay-sub"></div>
+      </div>
+    </main>
+
+    <aside class="panel panel-right">
+      <section class="box next-box">
+        <h2>NEXT</h2>
+        <canvas id="next-canvas"></canvas>
+      </section>
+    </aside>
+  </div>
+
+  <div id="touch" class="hidden">
+    <button data-act="hold" aria-label="Hold piece">HOLD</button>
+    <button data-act="left" aria-label="Move left">&#9664;</button>
+    <button data-act="right" aria-label="Move right">&#9654;</button>
+    <button data-act="rotate" aria-label="Rotate clockwise">&#10227;</button>
+    <button data-act="drop" aria-label="Hard drop">&#10515;</button>
+  </div>
+
+  <script type="module" src="./js/ui.js"></script>
+</body>
+</html>
