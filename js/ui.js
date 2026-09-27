@@ -127,6 +127,22 @@ export function spawnCount(base, intensity) {
   return Math.max(1, Math.ceil(base * m)); // min 1 when the master switch is on
 }
 
+/** Visible-row info for fully filled rows in a 40-row board: [{vr, colors}].
+ * Pure — unit-testable without DOM. The engine emits 'lock' BEFORE it removes
+ * full rows, so ui.js snapshots this right after each lock to know exactly
+ * which rows the clear wipe/spray must target (v3 bugfix: they are NOT always
+ * the bottom N visible rows) and what colors those cells had. */
+export function fullVisibleRows(board) {
+  const out = [];
+  for (let r = VISIBLE_TOP_ROW; r < board.length; r++) {
+    if (board[r].every((c) => c !== null)) {
+      const colors = [...new Set(board[r])]; // distinct piece types in the row
+      out.push({ vr: r - VISIBLE_TOP_ROW, colors });
+    }
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------- UI init
 
 let _initialized = false;
@@ -154,6 +170,7 @@ export function initUI(root = document.getElementById('app')) {
   // ------------------------------------------------------------- game + events
   const audio = new TetrisAudio(); // v2: one shared instance (CONTRACT-V2 §1/§2)
   let clearAnim = null;   // { rows, t0 } — line-clear flash/wipe (visual only)
+  let pendingClearRows = []; // visible rows full at last lock — ground truth for the wipe
   let dropTrail = null;   // { cols:[{c,top,bottom}], t0 } — hard-drop streaks
   let lockPop = null;     // { cells:[[cx,cy]], t0 } — settled-cell outline pulse
   let levelPulseT0 = 0;   // timestamp of last level-up (HUD scale pulse)
@@ -166,15 +183,19 @@ export function initUI(root = document.getElementById('app')) {
   const game = new Game({
     onEvent: (e) => {
       if (e.type === 'clear') {
-        // Engine already removed the rows — snapshot which ones cleared so the
-        // wipe can be drawn over the post-clear board (purely visual, §3.1).
-        const n = Math.min(e.lines, 20);
-        clearAnim = { rows: Array.from({ length: n }, (_, i) => 20 - n + i), t0: performance.now() };
-        spawnClearRows(n); // v3 §3: celebratory spray per cleared row (visual approximation)
+        // Ground truth: the rows snapshotted at lock time (the engine emits
+        // 'lock' before removing full rows — they are NOT always bottom-N).
+        const snap = pendingClearRows;
+        const rows = snap.length ? snap.map((s) => s.vr) : Array.from({ length: Math.min(e.lines, 20) }, (_, i) => 20 - e.lines + i);
+        clearAnim = { rows, t0: performance.now() };
+        spawnClearRows(rows, snap.length ? snap : null); // v3 §3: spray on the ACTUAL cleared rows
         if (e.tSpin && e.lines > 0) audio.playSfx('tspin');
         else if (e.lines === 4) audio.playSfx('tetris');
         else if (e.lines >= 1) audio.playSfx(`clear${Math.min(e.lines, 3)}`);
       } else if (e.type === 'lock') {
+        // Snapshot NOW: the board already holds the just-locked cells and the
+        // full rows are still present — this is ground truth for the clear FX.
+        pendingClearRows = fullVisibleRows(game.board);
         // §3.5: pulse the newly settled cells (visible rows only).
         const cells = [];
         for (const [cx, cy] of game.cellsOf(e.piece, e.x, e.y, e.rot)) {
@@ -509,7 +530,7 @@ export function initUI(root = document.getElementById('app')) {
     particles.spawnTrail(cx, bottomY + cell / 2, cell);
   }
 
-  /** Lock: small burst per locked cell, capped at ~40 total (§3). */
+  /** Lock: small burst per locked cell, capped at ~60 total (§3). */
   function spawnLockBursts(type, x, y, rot) {
     if (!settings.particles) return; // master switch — checked once
     const all = game.cellsOf(type, x, y, rot);
@@ -518,25 +539,27 @@ export function initUI(root = document.getElementById('app')) {
       if (cy >= VISIBLE_TOP_ROW && cy < 40) cells.push([cx, cy]); // visible rows only
     }
     if (!cells.length) return;
-    const perCell = spawnCount(2, settings.intensity); // base 2 sparks/cell × intensity
+    const perCell = spawnCount(3, settings.intensity); // base 3 sparks/cell × intensity
     let total = 0;
     for (const [cx, cy] of cells) {
-      if (total >= 40) break; // hard cap ~40 particles per lock
-      const n = Math.min(perCell, 40 - total);
+      if (total >= 60) break; // hard cap ~60 particles per lock
+      const n = Math.min(perCell, 60 - total);
       particles.spawnBurst((cx + 0.5) * cell, (cy - VISIBLE_TOP_ROW + 0.5) * cell, COLORS[type], n);
       total += n;
     }
   }
 
-  /** Line clear: spray across each cleared row (§3). The engine removes rows
-   * before the event, so we reuse v2's visual approximation — the bottom N rows
-   * of the visible board (same rows the wipe animates over). */
-  function spawnClearRows(n) {
-    if (!settings.particles || n <= 0) return; // master switch — checked once
-    const count = Math.min(n, 20);
-    for (let i = 0; i < count; i++) {
-      const vr = 20 - count + i; // bottom N visible rows, matching the v2 wipe
-      particles.spawnClearRow((vr + 0.5) * cell, BOARD_WIDTH, cell);
+  /** Line clear: spray across each ACTUAL cleared row (§3). `snap` is the
+   * lock-time snapshot [{vr, colors}] — rows are no longer assumed to be the
+   * bottom N (v3 bugfix); colors tint the sparks with the real cell types. */
+  function spawnClearRows(rows, snap) {
+    if (!settings.particles || !rows.length) return; // master switch — checked once
+    const mult = INTENSITY_STEPS[Math.max(0, Math.min(2, settings.intensity | 0))] ?? 1;
+    for (let i = 0; i < rows.length; i++) {
+      const vr = rows[i];
+      if (vr < 0 || vr >= 20) continue; // hidden-row clears: no visible spray
+      const colors = snap && snap[i] ? snap[i].colors.map((t) => COLORS[t]) : null;
+      particles.spawnClearRow((vr + 0.5) * cell, BOARD_WIDTH, cell, colors, Math.max(1, Math.round(BOARD_WIDTH * 3 * mult)));
     }
   }
 

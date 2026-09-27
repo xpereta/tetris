@@ -4,7 +4,7 @@
 // Coordinates are board pixel space ((0,0) = top-left of the visible board);
 // ui.js translates game coords before calling. Physics: position + velocity
 // (px/s), gravity ~600 px/s² for bursts/clears; trail dots fall straight with
-// no horizontal spread. Lifetime 350–700 ms, alpha fades linearly to 0, size
+// no horizontal spread. Lifetime 400–800 ms, alpha fades linearly to 0, size
 // shrinks slightly over life. Hard cap: 600 particles (drop oldest on overflow).
 
 const CAP = 600; // hard particle cap — spawning beyond it drops the oldest
@@ -44,13 +44,13 @@ export class ParticleSystem {
     for (let i = 0; i < n; i++) {
       const p = this._alloc();
       const a = Math.random() * TAU;
-      const sp = rand(60, 240); // px/s in a random direction
+      const sp = rand(80, 300); // px/s in a random direction
       p.x = x; p.y = y;
       p.vx = Math.cos(a) * sp;
       p.vy = Math.sin(a) * sp;
-      p.size = rand(1.5, 3.5);
-      p.alpha = rand(0.7, 1);
-      p.life = rand(350, 700); // ms
+      p.size = rand(2, 4);
+      p.alpha = rand(0.75, 1);
+      p.life = rand(400, 800); // ms
       p.age = 0;
       p.color = Math.random() < 0.3 ? '#ffffff' : color;
       p.grav = true;
@@ -58,15 +58,15 @@ export class ParticleSystem {
     }
   }
 
-  /** Falling: exactly ONE subtle dot below the piece (alpha ≤ 0.35, ~300 ms). */
+  /** Falling: exactly ONE dot below the piece (alpha ≤ 0.45, ~380 ms). */
   spawnTrail(x, y, dyPx) {
     const p = this._alloc();
     p.x = x; p.y = y;
     p.vx = 0; // straight down — no spread
     p.vy = Math.max(0, dyPx) * 2; // gentle initial fall scaled to the cell size (judgment call: dyPx drives speed, not offset)
-    p.size = rand(1.5, 2.5);
-    p.alpha = rand(0.2, 0.35);
-    p.life = rand(280, 340); // ~300 ms
+    p.size = rand(2, 3);
+    p.alpha = rand(0.3, 0.45);
+    p.life = rand(320, 420); // ~380 ms
     p.age = 0;
     p.color = '#ffffff';
     p.grav = false; // constant velocity — falls straight down
@@ -74,9 +74,11 @@ export class ParticleSystem {
     this._parts.push(p);
   }
 
-  /** Line clear: horizontal spray across a row (~widthCells×2 particles). */
-  spawnClearRow(y, widthCells, cellPx) {
-    const n = Math.max(1, Math.round(widthCells * 2));
+  /** Line clear: horizontal spray across a row (~widthCells×3 particles).
+   * `colors` (optional) tints the sparks with the actual cleared-cell colors;
+   * otherwise the fixed celebratory palette is used. `count` overrides n. */
+  spawnClearRow(y, widthCells, cellPx, colors = null, count = 0) {
+    const n = Math.max(1, count || Math.round(widthCells * 3));
     if (n <= 0) return;
     this._makeRoom(n);
     const w = Math.max(1, widthCells * cellPx); // full board width in px
@@ -86,13 +88,18 @@ export class ParticleSystem {
       p.x = t * w + rand(-cellPx * 0.2, cellPx * 0.2); // spread across the full width
       p.y = y + rand(-cellPx * 0.25, cellPx * 0.25);
       const dir = Math.random() < 0.5 ? -1 : 1;
-      p.vx = dir * rand(40, 180); // mostly horizontal
-      p.vy = -rand(20, 100); // upward kick (gravity pulls it back down)
-      p.size = rand(1.5, 3);
-      p.alpha = rand(0.7, 1);
-      p.life = rand(350, 700);
+      p.vx = dir * rand(40, 200); // mostly horizontal
+      p.vy = -rand(30, 120); // upward kick (gravity pulls it back down)
+      p.size = rand(2, 4);
+      p.alpha = rand(0.75, 1);
+      p.life = rand(400, 800);
       p.age = 0;
-      p.color = CLEAR_PALETTE[(Math.random() * CLEAR_PALETTE.length) | 0];
+      if (colors && colors.length) {
+        // ~25% white sparks over the real cleared-cell colors (v3.1).
+        p.color = Math.random() < 0.25 ? '#ffffff' : colors[(Math.random() * colors.length) | 0];
+      } else {
+        p.color = CLEAR_PALETTE[(Math.random() * CLEAR_PALETTE.length) | 0];
+      }
       p.grav = true; // recycled objects may carry grav=false from a trail dot
       this._parts.push(p);
     }
