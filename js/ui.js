@@ -203,8 +203,10 @@ export function initUI(root = document.getElementById('app')) {
         }
         lockPop = { cells, t0: performance.now() };
         spawnLockBursts(e.piece, e.x, e.y, e.rot); // v3 §3: particle burst per locked cell
+        particles.killTrails(); // stale trail dots must not drift into the NEXT piece's body
         audio.playSfx('lock');
       } else if (e.type === 'hold') {
+        particles.killTrails(); // same reason — a new piece spawns at the top
         audio.playSfx('hold');
       } else if (e.type === 'levelup') {
         levelPulseT0 = performance.now(); // §3.3: HUD scale pulse
@@ -519,15 +521,19 @@ export function initUI(root = document.getElementById('app')) {
   // All helpers are no-ops when settings.particles is off — checked ONCE here,
   // never per-particle. Coordinates: board pixel space of the visible 20 rows.
 
-  /** Falling trail dot below the piece's bounding box (gravity tick / soft drop). */
-  function spawnTrailDot() {
+  /** Falling trail dot BEHIND the piece (gravity tick / soft drop).
+   * `speedPxPerSec` must match how fast the piece is actually falling right now.
+   * Spawned 1.5 cells ABOVE the top edge: at exactly the piece's speed it then
+   * oscillates 0.5–1.5 cells above the top edge — always behind (above) the
+   * motion, never in front of or overlapping the piece body. */
+  function spawnTrailDot(speedPxPerSec) {
     if (!settings.particles || !settings.trail) return; // master + trail switches
     const cur = game.current;
     if (!cur) return;
     const b = pieceBounds(cur.type, cur.rot);
     const cx = (cur.x + (b.minC + b.maxC) / 2 + 0.5) * cell; // center x of the bounding box
-    const bottomY = (cur.y + b.maxR - VISIBLE_TOP_ROW + 1) * cell; // just below the lowest row
-    particles.spawnTrail(cx, bottomY + cell / 2, cell);
+    const topY = (cur.y + b.minR - VISIBLE_TOP_ROW) * cell; // top edge of the piece
+    particles.spawnTrail(cx, topY - 1.5 * cell, speedPxPerSec);
   }
 
   /** Lock: small burst per locked cell, capped at ~60 total (§3). */
@@ -751,7 +757,8 @@ export function initUI(root = document.getElementById('app')) {
       case 'ArrowDown':
         if (game.state === 'playing') {
           sd.held = true;
-          if (game.softDrop()) { audio.playSfx('softDrop'); spawnTrailDot(); } // v3 §3: soft-drop trail
+          // Soft drop moves one row per SOFT_REPEAT_MS — match that speed exactly.
+          if (game.softDrop()) { audio.playSfx('softDrop'); spawnTrailDot((cell / SOFT_REPEAT_MS) * 1000); } // v3 §3: soft-drop trail
           sd.next = now + SOFT_REPEAT_MS;
         }
         break;
@@ -853,7 +860,7 @@ export function initUI(root = document.getElementById('app')) {
       // Soft drop repeat while ArrowDown held (SFX throttled inside audio).
       if (sd.held && now >= sd.next) {
         while (now >= sd.next) {
-          if (game.softDrop()) { audio.playSfx('softDrop'); spawnTrailDot(); } // v3 §3: soft-drop trail
+          if (game.softDrop()) { audio.playSfx('softDrop'); spawnTrailDot((cell / SOFT_REPEAT_MS) * 1000); } // v3 §3: soft-drop trail
           sd.next += SOFT_REPEAT_MS;
         }
       }
@@ -868,7 +875,9 @@ export function initUI(root = document.getElementById('app')) {
         gms = game.gravityMs; // level may have changed mid-frame
         // v3 §3: falling trail — only when the SAME piece actually moved down.
         if (game.state === 'playing' && game.current === curBefore && yBefore !== null && curBefore.y > yBefore) {
-          spawnTrailDot();
+          spawnTrailDot((cell / gms) * 1000); // dot speed = current gravity speed → trails behind the piece
+        } else if (game.state === 'playing') {
+          particles.killTrails(); // piece stopped moving (grounded/lock delay) — stale dots must not drift into its body
         }
       }
     } else {
@@ -878,6 +887,15 @@ export function initUI(root = document.getElementById('app')) {
     // v3 §1: advance particle physics with the same clamped dt (visual only —
     // never touches engine timing or input).
     particles.update(dt);
+
+    // v3.1.1b invariant (AFTER physics, before draw): trail dots may never be in
+    // front of the falling piece's motion — i.e. below its top edge. Quantized
+    // gravity (several ticks per frame at high levels) can overshoot, so snap any
+    // straggler back to just above the line. Bursts/clears are untouched.
+    if (game.state === 'playing' && game.current) {
+      const b = pieceBounds(game.current.type, game.current.rot);
+      particles.clampTrailsAbove((game.current.y + b.minR - VISIBLE_TOP_ROW) * cell);
+    }
 
     drawAll(now);
   }

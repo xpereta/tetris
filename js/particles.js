@@ -58,12 +58,14 @@ export class ParticleSystem {
     }
   }
 
-  /** Falling: exactly ONE dot below the piece (alpha ≤ 0.45, ~380 ms). */
-  spawnTrail(x, y, dyPx) {
+  /** Falling: exactly ONE dot below the piece (alpha ≤ 0.45, ~380 ms).
+   * `fallSpeedPxPerSec` should match the piece's CURRENT fall speed so the dot
+   * stays glued just below it — never running ahead of or overlapping the piece. */
+  spawnTrail(x, y, fallSpeedPxPerSec) {
     const p = this._alloc();
     p.x = x; p.y = y;
     p.vx = 0; // straight down — no spread
-    p.vy = Math.max(0, dyPx) * 2; // gentle initial fall scaled to the cell size (judgment call: dyPx drives speed, not offset)
+    p.vy = Math.max(0, fallSpeedPxPerSec); // match the piece's speed (v3.1.1: was a fixed 2×cell px/s)
     p.size = rand(2, 3);
     p.alpha = rand(0.3, 0.45);
     p.life = rand(320, 420); // ~380 ms
@@ -102,6 +104,30 @@ export class ParticleSystem {
       }
       p.grav = true; // recycled objects may carry grav=false from a trail dot
       this._parts.push(p);
+    }
+  }
+
+  /** Remove all trail dots (grav=false) — called when a piece locks or is held,
+   * so stale dots can't drift into the NEXT piece's body. Bursts/clears survive. */
+  killTrails() {
+    let w = 0;
+    for (let i = 0; i < this._parts.length; i++) {
+      const p = this._parts[i];
+      if (!p.grav) { this._free.push(p); continue; } // recycle trail dots only
+      this._parts[w++] = p;
+    }
+    this._parts.length = w;
+  }
+
+  /** Hard invariant for the falling trail: no trail dot may sit below yPx — that
+   * would be IN FRONT of a downward-moving piece. Free physics + quantized
+   * gravity can overshoot at high levels (several ticks per frame, one update),
+   * so stragglers are snapped back to just above the line. Bursts/clears untouched. */
+  clampTrailsAbove(yPx) {
+    const limit = yPx - 2; // a hair above the piece's top edge (y grows downward)
+    for (let i = 0; i < this._parts.length; i++) {
+      const p = this._parts[i];
+      if (!p.grav && p.y > limit) p.y = limit;
     }
   }
 

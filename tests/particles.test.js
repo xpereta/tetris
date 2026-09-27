@@ -34,6 +34,35 @@ test('particles: spawnClearRow honors explicit colors and count overrides', () =
   assert.equal(ps.count, 7);
 });
 
+test('particles: spawnTrail falls at exactly the given speed; killTrails removes only trail dots', () => {
+  const ps = new ParticleSystem();
+  ps.spawnBurst(0, 0, '#ff5c5c', 4); // grav=true sparks must survive
+  ps.spawnTrail(10, 20, 93.3); // dot speed == piece gravity speed (v3.1.1)
+  assert.equal(ps.count, 5);
+  const dot = ps._parts.find((p) => !p.grav);
+  assert.ok(dot, 'trail dot exists');
+  assert.ok(Math.abs(dot.vy - 93.3) < 1e-9, `dot vy must equal the piece speed (got ${dot.vy})`);
+  ps.update(100); // 100 ms at that speed → exactly 9.33 px of travel
+  assert.ok(Math.abs(dot.y - (20 + 9.33)) < 1e-6, 'constant velocity — no gravity on trail dots');
+  ps.killTrails();
+  assert.equal(ps.count, 4, 'killTrails removes the dot but keeps bursts/clears');
+});
+
+test('particles: clampTrailsAbove keeps trail dots strictly above the line (never in front)', () => {
+  const ps = new ParticleSystem();
+  ps.spawnBurst(0, 500, '#ff5c5c', 4); // below the line — must SURVIVE untouched
+  ps.spawnTrail(10, 90, 200); // fast fall (high-level gravity) → past y=100 after one frame
+  ps.update(100);
+  const dot = ps._parts.find((p) => !p.grav);
+  assert.ok(dot && dot.y > 100, `precondition: live dot below the clamp line (got ${dot && dot.y})`);
+  const burstBefore = ps._parts.find((p) => p.grav && p.color === '#ff5c5c');
+  ps.clampTrailsAbove(100); // piece top edge at y=100 → dots must be above it
+  const after = ps._parts.find((p) => !p.grav);
+  assert.ok(after.y <= 98, `trail dot snapped to just above the line (got ${after.y})`);
+  const burstAfter = ps._parts.find((p) => p.grav && p.color === '#ff5c5c');
+  assert.equal(burstAfter.y, burstBefore.y, 'bursts/clears are never clamped');
+});
+
 test('fullVisibleRows: reports the ACTUAL full visible rows (not bottom-N)', () => {
   const W = 10;
   // 40-row board: only row 39 (bottom, vr=19) and row 25 (vr=5) are full.
