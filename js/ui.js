@@ -7,6 +7,7 @@
 import { Game, BOARD_WIDTH, VISIBLE_TOP_ROW } from './engine.js';
 import { SHAPES } from './srs.js';
 import { TetrisAudio } from './audio.js';
+import { ParticleSystem } from './particles.js'; // v3: particle effects (CONTRACT-V3 §1)
 
 export const COLORS = {
   I: '#3fd8f0',
@@ -75,6 +76,57 @@ export function drawPieceCentered(ctx, type, rot, cell, slotX, slotY, slotW, slo
   drawPiece(ctx, type, rot, cell, slotX + (slotW - w) / 2 - b.minC * cell, slotY + (slotH - h) / 2 - b.minR * cell);
 }
 
+// ------------------------------------------------- v3 settings (CONTRACT-V3 §2)
+
+const SETTINGS_KEY = 'tetris.settings';
+export const DEFAULT_SETTINGS = { particles: true, trail: true, intensity: 1 }; // Med
+const INTENSITY_STEPS = [0.5, 1, 2]; // Low / Med / High spawn-count multipliers (§2 table)
+const INTENSITY_LABELS = ['Low', 'Med', 'High'];
+
+/** localStorage or null — same guard pattern as the mute persistence in audio.js. */
+function settingsStorage() {
+  if (typeof window === 'undefined') return null;
+  try { return window.localStorage || null; } catch { return null; }
+}
+
+/** Load persisted settings with safe fallbacks: corrupt/missing → defaults (§2). */
+export function loadSettings() {
+  const out = { ...DEFAULT_SETTINGS };
+  const s = settingsStorage();
+  if (!s) return out;
+  try {
+    const raw = s.getItem(SETTINGS_KEY);
+    if (raw == null) return out;
+    const p = JSON.parse(raw);
+    if (p && typeof p === 'object') {
+      if (typeof p.particles === 'boolean') out.particles = p.particles;
+      if (typeof p.trail === 'boolean') out.trail = p.trail;
+      if (Number.isInteger(p.intensity) && p.intensity >= 0 && p.intensity <= 2) out.intensity = p.intensity;
+    }
+  } catch { /* corrupt JSON → defaults */ }
+  return out;
+}
+
+/** Persist settings as JSON. try/catch + window guard, like the mute persistence. */
+export function saveSettings(settings) {
+  const s = settingsStorage();
+  if (!s) return;
+  try {
+    s.setItem(SETTINGS_KEY, JSON.stringify({
+      particles: !!settings.particles,
+      trail: !!settings.trail,
+      intensity: Math.max(0, Math.min(2, settings.intensity | 0)),
+    }));
+  } catch { /* storage full/blocked — ignore */ }
+}
+
+/** Spawn-count multiplier for the current intensity step (§2): round up, min 1. */
+export function spawnCount(base, intensity) {
+  if (base <= 0) return 0;
+  const m = INTENSITY_STEPS[Math.max(0, Math.min(2, intensity | 0))] ?? 1;
+  return Math.max(1, Math.ceil(base * m)); // min 1 when the master switch is on
+}
+
 // ------------------------------------------------------------------- UI init
 
 let _initialized = false;
@@ -107,6 +159,10 @@ export function initUI(root = document.getElementById('app')) {
   let levelPulseT0 = 0;   // timestamp of last level-up (HUD scale pulse)
   let levelBorderT0 = 0;  // timestamp of last level-up (golden board-border tint)
   let overFadeT0 = 0;     // game-over overlay fade-in start
+  // v3: particle system + settings (CONTRACT-V3 §1/§2). Particles are purely
+  // visual — they never touch engine timing or input.
+  const particles = new ParticleSystem();
+  const settings = loadSettings();
   const game = new Game({
     onEvent: (e) => {
       if (e.type === 'clear') {
@@ -114,6 +170,7 @@ export function initUI(root = document.getElementById('app')) {
         // wipe can be drawn over the post-clear board (purely visual, §3.1).
         const n = Math.min(e.lines, 20);
         clearAnim = { rows: Array.from({ length: n }, (_, i) => 20 - n + i), t0: performance.now() };
+        spawnClearRows(n); // v3 §3: celebratory spray per cleared row (visual approximation)
         if (e.tSpin && e.lines > 0) audio.playSfx('tspin');
         else if (e.lines === 4) audio.playSfx('tetris');
         else if (e.lines >= 1) audio.playSfx(`clear${Math.min(e.lines, 3)}`);
@@ -124,6 +181,7 @@ export function initUI(root = document.getElementById('app')) {
           if (cy >= VISIBLE_TOP_ROW) cells.push([cx, cy]);
         }
         lockPop = { cells, t0: performance.now() };
+        spawnLockBursts(e.piece, e.x, e.y, e.rot); // v3 §3: particle burst per locked cell
         audio.playSfx('lock');
       } else if (e.type === 'hold') {
         audio.playSfx('hold');
@@ -139,10 +197,12 @@ export function initUI(root = document.getElementById('app')) {
     },
   });
 
-  // Debug/test hook: exposes the live game instance for headless verification.
+  // Debug/test hooks: expose live instances for headless verification.
   if (typeof window !== 'undefined') {
     window.__tetrisGame = game;
     window.__tetrisAudio = audio;
+    window.__tetrisParticles = particles; // v3 §2
+    window.__tetrisSettings = settings;   // v3 §2 — live reference, mutated in place
   }
 
   // ------------------------------------------------------------- canvas sizing
@@ -292,6 +352,9 @@ export function initUI(root = document.getElementById('app')) {
         lockPop = null;
       }
     }
+
+    // v3 §1: particles on top of everything (board pixel space — no transform).
+    if (particles.count > 0) particles.draw(bctx);
   }
 
   let holdSig = '';
@@ -431,6 +494,52 @@ export function initUI(root = document.getElementById('app')) {
     if (ok) audio.playSfx('rotate');
   }
 
+  // ------------------------------------------- v3 particle spawn wiring (§3)
+  // All helpers are no-ops when settings.particles is off — checked ONCE here,
+  // never per-particle. Coordinates: board pixel space of the visible 20 rows.
+
+  /** Falling trail dot below the piece's bounding box (gravity tick / soft drop). */
+  function spawnTrailDot() {
+    if (!settings.particles || !settings.trail) return; // master + trail switches
+    const cur = game.current;
+    if (!cur) return;
+    const b = pieceBounds(cur.type, cur.rot);
+    const cx = (cur.x + (b.minC + b.maxC) / 2 + 0.5) * cell; // center x of the bounding box
+    const bottomY = (cur.y + b.maxR - VISIBLE_TOP_ROW + 1) * cell; // just below the lowest row
+    particles.spawnTrail(cx, bottomY + cell / 2, cell);
+  }
+
+  /** Lock: small burst per locked cell, capped at ~40 total (§3). */
+  function spawnLockBursts(type, x, y, rot) {
+    if (!settings.particles) return; // master switch — checked once
+    const all = game.cellsOf(type, x, y, rot);
+    let cells = [];
+    for (const [cx, cy] of all) {
+      if (cy >= VISIBLE_TOP_ROW && cy < 40) cells.push([cx, cy]); // visible rows only
+    }
+    if (!cells.length) return;
+    const perCell = spawnCount(2, settings.intensity); // base 2 sparks/cell × intensity
+    let total = 0;
+    for (const [cx, cy] of cells) {
+      if (total >= 40) break; // hard cap ~40 particles per lock
+      const n = Math.min(perCell, 40 - total);
+      particles.spawnBurst((cx + 0.5) * cell, (cy - VISIBLE_TOP_ROW + 0.5) * cell, COLORS[type], n);
+      total += n;
+    }
+  }
+
+  /** Line clear: spray across each cleared row (§3). The engine removes rows
+   * before the event, so we reuse v2's visual approximation — the bottom N rows
+   * of the visible board (same rows the wipe animates over). */
+  function spawnClearRows(n) {
+    if (!settings.particles || n <= 0) return; // master switch — checked once
+    const count = Math.min(n, 20);
+    for (let i = 0; i < count; i++) {
+      const vr = 20 - count + i; // bottom N visible rows, matching the v2 wipe
+      particles.spawnClearRow((vr + 0.5) * cell, BOARD_WIDTH, cell);
+    }
+  }
+
   // v2 §2: mute button in the HUD header + M shortcut. Created here so no
   // index.html change is needed; inline styles keep it dependency-free.
   const statsBox = root.querySelector('.stats');
@@ -448,6 +557,135 @@ export function initUI(root = document.getElementById('app')) {
   muteBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleMute(); });
   syncMuteIcon();
   statsBox.appendChild(muteBtn);
+
+  // v3 §2: gear button + settings overlay panel. Reuses the pause-overlay visual
+  // language (dark backdrop, centered card); created here so no index.html change.
+  const gearBtn = document.createElement('button');
+  gearBtn.id = 'settings-btn';
+  gearBtn.type = 'button';
+  gearBtn.title = 'Settings (S)';
+  Object.assign(gearBtn.style, {
+    margin: '2px auto 0', padding: '4px 10px', fontSize: '15px', lineHeight: '1',
+    background: '#17233a', color: '#dce7f5', border: '1px solid #2c3e5c',
+    borderRadius: '8px', cursor: 'pointer', font: 'inherit',
+  });
+  gearBtn.textContent = '\u2699'; // ⚙ — same style as the mute button
+  statsBox.appendChild(gearBtn);
+
+  const settingsPanel = document.createElement('div');
+  settingsPanel.id = 'settings-panel';
+  Object.assign(settingsPanel.style, {
+    position: 'absolute', inset: '-1px', zIndex: '8', // above the game overlay (z-5)
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: 'rgba(6, 10, 17, .78)', backdropFilter: 'blur(3px)', borderRadius: '6px',
+  });
+  const card = document.createElement('div');
+  Object.assign(card.style, {
+    width: '248px', background: '#101826', border: '1px solid #2c3e5c', borderRadius: '10px',
+    padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: '12px', textAlign: 'center',
+  });
+  const panelTitle = document.createElement('div');
+  panelTitle.textContent = 'SETTINGS';
+  Object.assign(panelTitle.style, { fontSize: '17px', letterSpacing: '3px', fontWeight: '700', color: '#eaf2ff' });
+  card.appendChild(panelTitle);
+
+  const makeRow = (label) => {
+    const row = document.createElement('div');
+    Object.assign(row.style, { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' });
+    const lab = document.createElement('span');
+    lab.textContent = label;
+    Object.assign(lab.style, { fontSize: '13px', color: '#9fb2cc' });
+    row.appendChild(lab);
+    return row;
+  };
+  const makeToggleBtn = (initial) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    Object.assign(b.style, {
+      padding: '4px 12px', fontSize: '13px', lineHeight: '1.2', cursor: 'pointer', font: 'inherit',
+      background: '#17233a', color: '#dce7f5', border: '1px solid #2c3e5c', borderRadius: '8px',
+    });
+    b.textContent = initial ? 'ON' : 'OFF';
+    return b;
+  };
+
+  const particlesToggle = makeToggleBtn(settings.particles);
+  const trailToggle = makeToggleBtn(settings.trail);
+  const intensityBtns = INTENSITY_LABELS.map((lab, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    Object.assign(b.style, {
+      padding: '4px 8px', fontSize: '12px', lineHeight: '1.2', cursor: 'pointer', font: 'inherit',
+      background: '#17233a', color: '#dce7f5', border: '1px solid #2c3e5c', borderRadius: '8px',
+    });
+    b.textContent = lab;
+    return b;
+  });
+
+  const rowParticles = makeRow('Particles');
+  rowParticles.appendChild(particlesToggle);
+  card.appendChild(rowParticles);
+  const rowTrail = makeRow('Falling trail');
+  rowTrail.appendChild(trailToggle);
+  card.appendChild(rowTrail);
+  const rowIntensity = makeRow('Intensity');
+  const intensityGroup = document.createElement('div');
+  Object.assign(intensityGroup.style, { display: 'flex', gap: '4px' });
+  for (const b of intensityBtns) intensityGroup.appendChild(b);
+  rowIntensity.appendChild(intensityGroup);
+  card.appendChild(rowIntensity);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  Object.assign(closeBtn.style, {
+    marginTop: '2px', padding: '6px 10px', fontSize: '13px', lineHeight: '1.2', cursor: 'pointer', font: 'inherit',
+    background: '#17233a', color: '#dce7f5', border: '1px solid #2c3e5c', borderRadius: '8px',
+  });
+  closeBtn.textContent = 'CLOSE (Esc)';
+  card.appendChild(closeBtn);
+
+  settingsPanel.appendChild(card);
+  boardWrap.appendChild(settingsPanel);
+  settingsPanel.classList.add('hidden'); // .hidden is display:none !important — overrides flex
+
+  let settingsOpen = false;
+  let pausedForSettings = false; // did WE pause the game? (never double-pause, §2)
+
+  const syncSettingsUI = () => {
+    particlesToggle.textContent = settings.particles ? 'ON' : 'OFF';
+    trailToggle.textContent = settings.trail ? 'ON' : 'OFF';
+    for (let i = 0; i < intensityBtns.length; i++) {
+      intensityBtns[i].style.background = settings.intensity === i ? '#26406b' : '';
+    }
+  };
+
+  function openSettingsMenu() {
+    if (settingsOpen) return;
+    settingsOpen = true;
+    pausedForSettings = game.state === 'playing'; // reuse existing pause mechanics — no double-pause
+    if (pausedForSettings) pauseGame();
+    syncSettingsUI();
+    settingsPanel.classList.remove('hidden');
+  }
+
+  function closeSettingsMenu() {
+    if (!settingsOpen) return;
+    settingsOpen = false;
+    settingsPanel.classList.add('hidden');
+    // Resume only the pause we caused — a user-initiated pause stays intact.
+    const wasOurs = pausedForSettings;
+    pausedForSettings = false;
+    if (wasOurs && game.state === 'paused') resumeGame();
+  }
+
+  gearBtn.addEventListener('click', (e) => { e.stopPropagation(); openSettingsMenu(); });
+  closeBtn.addEventListener('click', (e) => { e.stopPropagation(); closeSettingsMenu(); });
+  settingsPanel.addEventListener('click', (e) => { if (e.target === settingsPanel) closeSettingsMenu(); }); // backdrop click
+
+  const setSetting = (key, value) => { settings[key] = value; saveSettings(settings); syncSettingsUI(); };
+  particlesToggle.addEventListener('click', () => setSetting('particles', !settings.particles));
+  trailToggle.addEventListener('click', () => setSetting('trail', !settings.trail));
+  intensityBtns.forEach((b, i) => b.addEventListener('click', () => setSetting('intensity', i)));
 
   function pauseGame() { game.pause(); audio.stopMusic(); audio.playSfx('pause'); }
   function resumeGame() { game.resume(); audio.startMusic(); }
@@ -468,7 +706,7 @@ export function initUI(root = document.getElementById('app')) {
   const GAME_KEYS = new Set([
     'ArrowLeft', 'ArrowRight', 'ArrowDown', 'ArrowUp', ' ',
     'x', 'X', 'z', 'Z', 'c', 'C', 'Shift', 'p', 'P', 'Escape', 'Enter',
-    'm', 'M',
+    'm', 'M', 's', 'S', // v3: S opens/closes the settings menu (§2)
   ]);
 
   window.addEventListener('keydown', (e) => {
@@ -477,13 +715,20 @@ export function initUI(root = document.getElementById('app')) {
     e.preventDefault(); // stop page scroll on Space/arrows
     if (e.repeat) return; // OS repeat ignored — DAS/ARR handled in the frame loop
     const now = performance.now();
+    // v3 §2: while the settings menu is open, only S/Esc act — everything else
+    // is swallowed so no game input leaks through. The game itself is paused.
+    if (settingsOpen) {
+      if (e.key === 's' || e.key === 'S') closeSettingsMenu();
+      else if (e.key === 'Escape') closeSettingsMenu();
+      return;
+    }
     switch (e.key) {
       case 'ArrowLeft': pressDir(-1, now); break;
       case 'ArrowRight': pressDir(1, now); break;
       case 'ArrowDown':
         if (game.state === 'playing') {
           sd.held = true;
-          if (game.softDrop()) audio.playSfx('softDrop'); // throttled inside audio
+          if (game.softDrop()) { audio.playSfx('softDrop'); spawnTrailDot(); } // v3 §3: soft-drop trail
           sd.next = now + SOFT_REPEAT_MS;
         }
         break;
@@ -502,6 +747,9 @@ export function initUI(root = document.getElementById('app')) {
         break;
       case 'p': case 'P': case 'Escape':
         togglePause();
+        break;
+      case 's': case 'S':
+        openSettingsMenu(); // v3 §2 — S opens/closes (closing handled above)
         break;
       case 'm': case 'M':
         toggleMute();
@@ -582,7 +830,7 @@ export function initUI(root = document.getElementById('app')) {
       // Soft drop repeat while ArrowDown held (SFX throttled inside audio).
       if (sd.held && now >= sd.next) {
         while (now >= sd.next) {
-          if (game.softDrop()) audio.playSfx('softDrop');
+          if (game.softDrop()) { audio.playSfx('softDrop'); spawnTrailDot(); } // v3 §3: soft-drop trail
           sd.next += SOFT_REPEAT_MS;
         }
       }
@@ -590,13 +838,23 @@ export function initUI(root = document.getElementById('app')) {
       acc += dt;
       let gms = game.gravityMs;
       while (acc >= gms) {
+        const curBefore = game.current; // identity check: tick() may lock + respawn
+        const yBefore = curBefore ? curBefore.y : null;
         game.tick();
         acc -= gms;
         gms = game.gravityMs; // level may have changed mid-frame
+        // v3 §3: falling trail — only when the SAME piece actually moved down.
+        if (game.state === 'playing' && game.current === curBefore && yBefore !== null && curBefore.y > yBefore) {
+          spawnTrailDot();
+        }
       }
     } else {
       acc = 0;
     }
+
+    // v3 §1: advance particle physics with the same clamped dt (visual only —
+    // never touches engine timing or input).
+    particles.update(dt);
 
     drawAll(now);
   }
