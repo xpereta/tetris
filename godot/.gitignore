@@ -1,0 +1,4 @@
+# Godot build/import cache — regenerated on first open (see README)
+.godot/
+# Exported binaries are build artifacts: regenerate with the command in README.md
+dist/

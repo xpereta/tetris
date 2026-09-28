@@ -134,6 +134,21 @@ func cells_of(type: String, x: int, y: int, rot: int) -> Array:
 	return out
 
 
+# Bounding box of a piece's cells (RELATIVE offsets), like the web pieceBounds():
+# {minC, maxC, minR, maxR}. Pure — used by presentation code (trail spawn/clamp).
+func piece_bounds(type: String, rot: int) -> Dictionary:
+	var min_c := 99
+	var max_c := -99
+	var min_r := 99
+	var max_r := -99
+	for cell in SRS.SHAPES[type][rot]:
+		min_c = mini(min_c, int(cell[0]))
+		max_c = maxi(max_c, int(cell[0]))
+		min_r = mini(min_r, int(cell[1]))
+		max_r = maxi(max_r, int(cell[1]))
+	return {"minC": min_c, "maxC": max_c, "minR": min_r, "maxR": max_r}
+
+
 func collides(cells: Array) -> bool:
 	for cell in cells:
 		var cx := int(cell[0])
