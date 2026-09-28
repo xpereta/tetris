@@ -75,15 +75,27 @@ data size, which breaks the seamless-loop math (`loop_end = data.size() / 2` sam
 the music would stop ~13 s into a 65 s loop. If you re-import and hear it cut short,
 check these files first.
 
-## Exporting (Linux/X11 single binary)
+## Exporting (single self-contained binaries)
+
+Export templates for 4.7.2 must be installed first (Editor → Manage Export Templates).
 
 ```sh
-godot --headless --export-release "Linux" dist/tetris_linux.x86_64
+godot --headless --export-release "Linux"           dist/tetris_linux.x86_64
+godot --headless --export-release "Windows Desktop" dist/tetris_windows_x86_64.exe
 ```
 
-The preset (`export_presets.cfg`) embeds the PCK into the binary
-(`binary_format/embed_pck=true`), so the result is one self-contained executable.
-Export templates for 4.7.2 must be installed (Editor → Manage Export Templates).
+Both presets embed the PCK into the binary (`binary_format/embed_pck=true`), so each
+result is one self-contained executable — no sidecar files. `dist/` is git-ignored;
+regenerate with the commands above (or grab a release artifact).
+
+**macOS:** Godot can only export macOS builds *from* a Mac. On your machine: open the
+project in Godot 4.x, add a "Mac OSX" preset (x86_64 + arm64), and run
+`godot --headless --export-release "Mac OSX" dist/tetris_macos`. Note: unsigned builds
+must be right-click → Open on first launch.
+
+**Verified:** the Linux binary boots clean under Xvfb (120 frames, zero script errors).
+The Windows .exe is exported from the identical project/PCK but has not been executed
+on this machine (no Wine) — run it once to confirm.
 
 ## Layout
 
